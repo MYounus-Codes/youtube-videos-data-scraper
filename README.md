@@ -1,14 +1,13 @@
 # 🎬 YouTube Search Scraper
 
-A robust, browser-based YouTube search scraper that collects **as many results as you ask for** by simulating real infinite scroll — no API keys, no hard limits.
+A robust, lightweight YouTube search scraper that collects video titles, view counts, channels, and URLs — **no browser, no API key, no Selenium** — using Python's `requests`, `BeautifulSoup`, and `Pandas`.
 
-Built with **Selenium + undetected-chromedriver**, **BeautifulSoup**, and **Pandas**.
+Automatically paginates through YouTube's internal continuation API to collect as many results as you need, with full error handling, retry logic, and clean CSV export.
 
 ---
 
 ## 📋 Table of Contents
 
-- [Why This Exists](#-why-this-exists)
 - [How It Works](#-how-it-works)
 - [Features](#-features)
 - [Requirements](#-requirements)
@@ -18,38 +17,30 @@ Built with **Selenium + undetected-chromedriver**, **BeautifulSoup**, and **Pand
 - [Output Format](#-output-format)
 - [Project Structure](#-project-structure)
 - [Architecture](#-architecture)
+- [Known Limitation](#-known-limitation)
 - [Troubleshooting](#-troubleshooting)
-- [Limitations](#-limitations)
 - [License](#-license)
-
----
-
-## 🤔 Why This Exists
-
-YouTube's internal search continuation API (`/youtubei/v1/search`) silently stops issuing pagination tokens after ~4 pages when it detects a scripted/headless client. This means pure-requests scrapers hard-cap at ~36 results regardless of what you ask for.
-
-This scraper solves that by driving a **real Chrome browser** that YouTube cannot distinguish from a human. Chrome scrolls the page, YouTube lazily loads more cards, the scraper harvests them — indefinitely until your target is reached.
 
 ---
 
 ## ⚙️ How It Works
 
 ```
-1.  Launch Chrome (visible or headless) via undetected-chromedriver
-2.  Navigate to youtube.com/results?search_query=<your query>
-3.  Dismiss cookie/consent dialogs automatically if present
-4.  Loop:
-      a. Extract videos from window.ytInitialData  (JS context — rich metadata)
-      b. Extract videos from ytd-video-renderer DOM cards  (catches dynamic loads)
-      c. Merge both sources, deduplicate by URL
-      d. Scroll down 3000px
-      e. Wait 1.5s for new cards to render
-      f. Repeat until target count reached OR 6 consecutive scrolls yield nothing
-5.  Trim to exact requested count
-6.  Save to CSV via Pandas
+1.  GET youtube.com/results?search_query=<query>
+      └─ Parse ytInitialData JSON blob embedded in the HTML
+      └─ Extract first ~12–20 videos + continuation token + API key + client version
+      └─ BeautifulSoup fallback if JSON blob is missing
+
+2.  POST youtube.com/youtubei/v1/search   (repeat until target reached)
+      └─ Body: { context: { client: {...} }, continuation: <token> }
+      └─ Response: next batch of videos + next continuation token
+
+3.  Deduplicate all videos by URL across every page
+
+4.  Trim to exact requested count → save to CSV via Pandas
 ```
 
-The dual-harvest strategy (JS snapshot + DOM cards) ensures no video is missed even when YouTube's internal data object lags behind the rendered page.
+Every network call has **retry logic** (3 attempts, 2s delay). Client errors (4xx) are not retried; server errors (5xx) are.
 
 ---
 
@@ -57,17 +48,18 @@ The dual-harvest strategy (JS snapshot + DOM cards) ensures no video is missed e
 
 | Feature | Detail |
 |---|---|
-| **Unlimited results** | Scrolls until your target is hit — tested to 300+ |
-| **Bot-detection bypass** | `undetected-chromedriver` patches Chrome automation fingerprints |
-| **Dual data extraction** | JS context + DOM fallback — catches every card |
-| **Deduplication** | URL-based seen-set prevents double-counting across scrolls |
-| **Smart stall detection** | Stops after 6 empty scrolls — won't hang on short result sets |
-| **Auto consent handling** | Clicks away cookie banners automatically |
-| **Headless mode** | `--headless` flag for server / CI use |
-| **Auto-named output** | CSV filename includes query slug + UTC timestamp |
-| **Dual logging** | Console + `scraper.log` file |
-| **View count normalisation** | `"1.2M views"` → `1200000` integer column |
-| **Rich metadata** | Title, channel, view count, duration, publish date, URL, scraped_at |
+| **No browser required** | Pure `requests` — fast, lightweight, no Chrome/Selenium dependency |
+| **No API key needed** | Uses YouTube's internal `ytInitialData` JSON and continuation endpoint |
+| **Automatic pagination** | Follows continuation tokens page-by-page until target count is hit |
+| **Retry logic** | 3 attempts per request with configurable delay; smart 4xx/5xx handling |
+| **BeautifulSoup fallback** | Falls back to HTML parsing if the JSON blob is unavailable |
+| **Deduplication** | URL-based seen-set prevents duplicates across pages |
+| **Configurable delay** | `--delay` flag controls pause between continuation requests |
+| **View count normalisation** | `"1.2M views"` → `1200000` integer + raw text both saved |
+| **Rich metadata** | Title, channel, view count (int + text), duration, publish date, URL, timestamp |
+| **Auto-named output** | CSV filename includes query slug + UTC timestamp if no name given |
+| **Dual logging** | Console output + `scraper.log` file written simultaneously |
+| **UTF-8 BOM CSV** | Opens correctly in Excel without encoding issues |
 
 ---
 
@@ -76,12 +68,12 @@ The dual-harvest strategy (JS snapshot + DOM cards) ensures no video is missed e
 | Requirement | Version |
 |---|---|
 | Python | 3.10 or higher |
-| Google Chrome | 112 or higher (must be installed) |
-| selenium | latest |
-| undetected-chromedriver | latest |
+| requests | latest |
+| beautifulsoup4 | latest |
 | pandas | latest |
+| lxml *(optional)* | faster HTML parser for BeautifulSoup fallback |
 
-> **ChromeDriver is managed automatically** by `undetected-chromedriver` — you do not need to download or configure it manually.
+No browser. No ChromeDriver. No API credentials.
 
 ---
 
@@ -97,46 +89,35 @@ cd youtube-scraper
 ### 2. Create a virtual environment (recommended)
 
 ```bash
-# Standard venv
+# Create
 python -m venv .venv
 
-# Windows
+# Activate — Windows
 .venv\Scripts\activate
 
-# macOS / Linux
+# Activate — macOS / Linux
 source .venv/bin/activate
 ```
 
 ### 3. Install dependencies
 
 ```bash
-pip install selenium undetected-chromedriver pandas
+pip install requests beautifulsoup4 pandas lxml
 ```
 
-Or if you use `uv`:
+Using `uv`:
 
 ```bash
-uv pip install selenium undetected-chromedriver pandas
+uv pip install requests beautifulsoup4 pandas lxml
 ```
 
-### 4. Verify Chrome is installed
-
-```bash
-# Windows — check version in Chrome's about page
-# macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --version
-
-# Linux
-google-chrome --version
-# or
-chromium-browser --version
-```
+No other setup needed.
 
 ---
 
 ## 💻 Usage
 
-### Basic — collect 50 videos (default)
+### Collect 50 videos (default)
 
 ```bash
 python youtube_scraper.py -q "python tutorials"
@@ -148,28 +129,28 @@ python youtube_scraper.py -q "python tutorials"
 python youtube_scraper.py -q "machine learning" -n 150
 ```
 
-### Save to a custom file
+### Save to a custom file name
 
 ```bash
-python youtube_scraper.py -q "lo-fi beats" -n 200 -o lofi_music.csv
+python youtube_scraper.py -q "lo-fi music" -n 100 -o lofi.csv
 ```
 
-### Run headless (no browser window — good for servers)
+### Slow down requests (be more polite)
 
 ```bash
-python youtube_scraper.py -q "data science" -n 100 --headless
+python youtube_scraper.py -q "web development" -n 80 --delay 1.5
 ```
 
 ### Combine all options
 
 ```bash
-python youtube_scraper.py -q "deep learning course" -n 300 --headless -o deep_learning.csv
+python youtube_scraper.py -q "deep learning course" -n 200 -o deep_learning.csv --delay 1.2
 ```
 
 ### Use long-form flags
 
 ```bash
-python youtube_scraper.py --query "web development" --max_results 75 --output webdev.csv
+python youtube_scraper.py --query "data science" --max_results 75 --output ds.csv --delay 1.0
 ```
 
 ---
@@ -178,37 +159,39 @@ python youtube_scraper.py --query "web development" --max_results 75 --output we
 
 ```
 usage: youtube_scraper.py [-h] --query QUERY [--max_results MAX_RESULTS]
-                          [--output OUTPUT] [--headless]
+                          [--output OUTPUT] [--delay DELAY]
 
 options:
-  -h, --help                        Show this help message and exit
+  -h, --help                        Show help and exit
 
 required:
   -q, --query       QUERY           YouTube search query string
 
 optional:
-  -n, --max_results MAX_RESULTS     Number of videos to collect (default: 50)
+  -n, --max_results MAX_RESULTS     Number of videos to collect
+                                    (default: 50)
   -o, --output      OUTPUT          Output CSV file path
                                     Auto-named as youtube_<query>_<timestamp>.csv
                                     if omitted
-      --headless                    Run Chrome without a visible window
+  -d, --delay       DELAY           Seconds to wait between continuation
+                                    requests (default: 0.8)
 ```
 
-### Examples at a glance
+### Quick-reference table
 
 | Goal | Command |
 |---|---|
 | Quick 50-video scrape | `python youtube_scraper.py -q "react tutorial"` |
-| Large dataset, 300 videos | `python youtube_scraper.py -q "javascript" -n 300` |
-| Server / no display | `python youtube_scraper.py -q "ai tools" -n 100 --headless` |
-| Named output file | `python youtube_scraper.py -q "cooking" -n 80 -o cooking.csv` |
-| All options combined | `python youtube_scraper.py -q "guitar lessons" -n 200 --headless -o guitar.csv` |
+| Large dataset | `python youtube_scraper.py -q "javascript" -n 200` |
+| Custom output file | `python youtube_scraper.py -q "cooking" -n 80 -o cooking.csv` |
+| Slower, polite scraping | `python youtube_scraper.py -q "AI tools" -n 100 -d 2.0` |
+| All options | `python youtube_scraper.py -q "guitar lessons" -n 150 -o guitar.csv -d 1.2` |
 
 ---
 
 ## 📊 Output Format
 
-Results are saved as a **UTF-8 BOM CSV** (opens correctly in Excel without encoding issues).
+Results are saved as a **UTF-8 BOM CSV** — opens correctly in Excel without any encoding configuration.
 
 ### Columns
 
@@ -221,11 +204,11 @@ Results are saved as a **UTF-8 BOM CSV** (opens correctly in Excel without encod
 | `duration` | string | `6:14:07` | Video duration (H:MM:SS or MM:SS) |
 | `published` | string | `3 years ago` | Relative publish date as shown on YouTube |
 | `url` | string | `https://youtube.com/watch?v=...` | Full canonical video URL |
-| `scraped_at` | string | `2026-05-24T12:30:00+00:00` | UTC timestamp of when the row was scraped |
+| `scraped_at` | string | `2026-05-24T12:30:00` | UTC timestamp of when the row was scraped |
 
 ### Auto-named file format
 
-When `--output` is omitted, the file is named:
+When `--output` is omitted, the filename is generated as:
 
 ```
 youtube_<query_slug>_<YYYYMMDD_HHMMSS>.csv
@@ -233,21 +216,22 @@ youtube_<query_slug>_<YYYYMMDD_HHMMSS>.csv
 # Examples:
 youtube_python_tutorials_20260524_123045.csv
 youtube_machine_learning_20260524_130512.csv
+youtube_lo_fi_music_20260524_141200.csv
 ```
 
 ### Terminal preview
 
-After saving, a summary table is printed to the console:
+After every run a summary table prints to the console:
 
 ```
-========================================================================
+======================================================================
   150 videos saved → youtube_python_course_20260524_123045.csv
-========================================================================
-                                    title        view_text         channel
-         Python Full Course for Beginners  47,772,495 views  Programming ...
-                   Learn Python in 1 Hour  24,297,526 views  Programming ...
+======================================================================
+                                    title        view_text            channel
+         Python Full Course for Beginners  47,772,495 views  Programming with Mosh
+                   Learn Python in 1 Hour  24,297,526 views  Programming with Mosh
   ...
-========================================================================
+======================================================================
 ```
 
 ---
@@ -259,101 +243,118 @@ youtube-scraper/
 │
 ├── youtube_scraper.py      # Main script — all scraping logic
 ├── README.md               # This file
-├── scraper.log             # Auto-generated log file (created on first run)
-│
-└── outputs/                # Suggested folder for CSV files (optional)
-    └── youtube_*.csv
+└── scraper.log             # Auto-created on first run; appended on each run
 ```
 
-The project is intentionally single-file for simplicity — no package structure needed.
+Single-file project — no package structure, no config files needed.
 
 ---
 
 ## 🏗 Architecture
 
-### Key components
+### Module layout
 
 ```
 youtube_scraper.py
 │
-├── build_driver()               Browser setup with bot-bypass options
+├── _get()                      HTTP GET with 3-attempt retry logic
+├── _post()                     HTTP POST with 3-attempt retry logic
 │
-├── scrape_youtube_search()      Main orchestration loop
-│   ├── _extract_from_dom_json() Harvest from window.ytInitialData (JS)
-│   ├── _scrape_rendered_cards() Harvest from ytd-video-renderer DOM nodes
-│   └── _merge()                 Deduplicate and accumulate results
+├── _parse_initial_page()       Parse page-1 HTML → videos + token + api_key + client_ver
+│   ├── ytInitialData regex     Extracts embedded JSON blob from raw HTML
+│   └── _extract_videos_and_token()  Walks sectionListRenderer contents
 │
-├── _parse_renderer()            Parse a single videoRenderer dict → flat record
-├── parse_view_count()           "1.2M views" → 1200000
+├── _fetch_continuation()       POST to /youtubei/v1/search with token
+│   └── _extract_videos_and_token()  Walks appendContinuationItemsAction items
 │
-└── save_to_csv()                Pandas DataFrame → UTF-8 BOM CSV
+├── _bs4_fallback()             BeautifulSoup HTML parse — used if JSON blob missing
+│
+├── _extract_video()            Parse one videoRenderer dict → flat record dict
+├── parse_view_count()          "1.2M views" → 1200000 integer
+│
+├── scrape_youtube_search()     Orchestration loop: page 1 → continuations → dedup
+└── save_to_csv()               Pandas DataFrame → UTF-8 BOM CSV + terminal table
 ```
 
-### Why `undetected-chromedriver`?
-
-Standard `selenium.webdriver.Chrome` injects JavaScript properties (`navigator.webdriver`, `__selenium_*`, etc.) that YouTube detects and uses to throttle or stop serving continuation tokens. `undetected-chromedriver` patches these at the binary level before Chrome starts, making the session indistinguishable from a normal user.
-
-### Stall detection logic
+### Pagination flow in detail
 
 ```
-stale_scrolls = 0
-
-on each scroll:
-  if newly_added == 0:
-    stale_scrolls += 1
-    extra wait (2.25s instead of 1.5s)
-  else:
-    stale_scrolls = 0
-
-if stale_scrolls >= 6:
-  stop — YouTube has no more results
+GET /results?search_query=python
+  └─ ytInitialData JSON  →  ~12–20 videos  +  token₁  +  API key  +  client version
+        │
+        ▼
+POST /youtubei/v1/search  { continuation: token₁, context: { client: WEB } }
+  └─ onResponseReceivedCommands  →  ~8–20 videos  +  token₂
+        │
+        ▼
+POST /youtubei/v1/search  { continuation: token₂ }
+  └─  ~8–20 videos  +  token₃
+        │
+        ▼  (repeat until max_results reached OR no token returned)
 ```
 
-This means the scraper **never hangs** — it exits cleanly whether you ask for 50 videos on a query with 40 results, or 500 on a saturated topic.
+### Retry logic
+
+```
+for attempt in 1..3:
+    try request
+    on HTTPError:
+        if status < 500:  return None  # don't retry client errors
+        else:             continue     # retry server errors
+    on ConnectionError / Timeout:
+        wait 2s, retry
+    on other RequestException:
+        return None immediately
+return None after all attempts exhausted
+```
+
+### Deduplication
+
+A `seen_urls: set[str]` is built from page-1 results and extended on every continuation page. Only videos whose URL is not already in the set are appended. This prevents counting the same video twice if YouTube returns overlapping results across pages.
+
+---
+
+## ⚠️ Known Limitation
+
+YouTube's internal continuation API stops issuing tokens after approximately **4–5 pages** (~36–50 results) when it detects a non-browser client — regardless of how the requests are structured.
+
+This means:
+
+- Queries with massive result pools (e.g. "python") may cap around **36–50 results** with this script
+- The scraper will stop cleanly with a log message: `No new unique videos — stopping pagination`
+- This is a server-side decision by YouTube based on the absence of real browser signals
+
+**If you need more than ~50 results**, use a browser-based approach (Selenium + undetected-chromedriver) which bypasses this limit by running a real Chrome session. This script is best suited for collecting up to ~50 high-quality results quickly and without any browser dependency.
 
 ---
 
 ## 🔧 Troubleshooting
 
-### `ModuleNotFoundError: No module named 'undetected_chromedriver'`
+### `ModuleNotFoundError`
 ```bash
-pip install undetected-chromedriver
+pip install requests beautifulsoup4 pandas lxml
 ```
 
-### Chrome version mismatch error
-`undetected-chromedriver` auto-downloads the matching ChromeDriver. If it fails, update Chrome to the latest version and retry.
+### Script exits with "No videos found"
+YouTube may have changed its page structure. Check `scraper.log` for the specific error. The most common cause is a change to the `ytInitialData` JSON path. The BeautifulSoup fallback will activate automatically if the JSON blob regex fails.
 
-### Only getting ~20–36 results
-You are likely running an older version of this script that used the requests-based approach. Switch to this Selenium version — that hard cap does not exist here.
+### Only getting 12–36 results when requesting more
+This is the [known limitation](#-known-limitation) above — YouTube caps continuation tokens for non-browser clients. The scraper collects everything available and stops cleanly.
 
-### Browser window flashes and closes immediately
-Chrome crashed during launch. Try:
-```bash
-# Add to build_driver() options if on Linux with no display:
-options.add_argument("--headless=new")
-options.add_argument("--disable-software-rasterizer")
-```
-
-### `TimeoutException: waiting for search results`
-YouTube loaded slowly or returned a captcha. Try:
-- Running without `--headless` so you can see what the browser shows
-- Adding a longer `PAGE_TIMEOUT` value in the constants section
-
-### Consent dialog not dismissed
-YouTube occasionally changes its consent dialog markup. The scraper looks for buttons containing "Accept", "Reject all", or "I agree". If your region shows different text, you can extend the XPath in `scrape_youtube_search()`.
+### `JSONDecodeError` in scraper.log
+YouTube returned a malformed or truncated page. This usually resolves on retry. Run the command again.
 
 ### CSV opens with garbled characters in Excel
-The file is saved with UTF-8 BOM encoding (`utf-8-sig`) specifically to fix this. If it still happens, use **Data → From Text/CSV** in Excel and select UTF-8 manually.
+The file is saved with UTF-8 BOM encoding (`utf-8-sig`) specifically for Excel compatibility. If it still garbles, use **Data → From Text/CSV** in Excel and manually select UTF-8.
 
----
+### `view_count` column shows `null` / `NaN`
+Some videos (live streams, premieres, very new uploads) don't expose a view count in search results. The `view_text` column will show `N/A` in those cases.
 
-## ⚠️ Limitations
-
-- **YouTube search cap** — YouTube itself typically returns 200–400 unique results per query regardless of scroll count. Highly specific queries may return fewer. The scraper will stop cleanly when results are exhausted.
-- **Speed** — each scroll waits 1.5s for renders, so 150 results takes roughly 30–60 seconds depending on your internet speed.
-- **Chrome required** — Firefox is not supported. Chrome must be installed on the machine.
-- **No proxy support** — built-in. Add `options.add_argument("--proxy-server=...")` to `build_driver()` manually if needed.
-- **YouTube ToS** — scraping YouTube may conflict with their Terms of Service. Use responsibly, for personal/research purposes only.
+### Rate limiting / 429 errors
+Increase the delay between requests:
+```bash
+python youtube_scraper.py -q "your query" -n 100 --delay 3.0
+```
 
 ---
 
@@ -361,8 +362,8 @@ The file is saved with UTF-8 BOM encoding (`utf-8-sig`) specifically to fix this
 
 MIT License — free to use, modify, and distribute with attribution.
 
+> **Note:** Scraping YouTube may conflict with their Terms of Service. Use responsibly and for personal or research purposes only.
+
 ---
 
-<p align="center">
-  Built with Python 🐍 · Selenium 🤖 · Pandas 🐼
-</p>
+<p align="center">Built with Python 🐍 · requests · BeautifulSoup · Pandas</p>
